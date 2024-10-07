@@ -1,6 +1,7 @@
 package main
 
 import (
+	"embed"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -12,13 +13,16 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
+//go:embed config.json
+var configFile embed.FS
+
 type Config struct {
-	BotToken string `json:"bot-token"`
+	BotToken  string `json:"bot-token"`
 	DebugMode bool   `json:"debug-mode"`
 }
 
 func main() {
-	conf, err := getConfig()
+	conf, err := loadConfig()
 	if err != nil {
 		panic(fmt.Errorf("error loading configuration: %v", err))
 	}
@@ -93,7 +97,12 @@ func downloadMP3(url string, chatID int64) (string, error) {
 
 	cmd := exec.Command("yt-dlp", "-x", "--audio-format", "mp3", "-o", filenameTemplate, url)
 
-	if err := cmd.Run(); err != nil {
+	output, err := cmd.CombinedOutput()
+
+	log.Printf("yt-dlp output: %s", output)
+
+	if err != nil {
+		log.Println("Error executing yt-dlp:", err)
 		return "", err
 	}
 
@@ -102,16 +111,16 @@ func downloadMP3(url string, chatID int64) (string, error) {
 	return mp3Filename, nil
 }
 
-func getConfig() (*Config, error) {
-	file, err := os.Open("config.json")
+func loadConfig() (*Config, error) {
+	data, err := configFile.ReadFile("config.json")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("could not read config: %v", err)
 	}
-	defer file.Close()
 
 	var config Config
-	if err := json.NewDecoder(file).Decode(&config); err != nil {
-		return nil, err
+	err = json.Unmarshal(data, &config)
+	if err != nil {
+		return nil, fmt.Errorf("could not parse config: %v", err)
 	}
 
 	return &config, nil
