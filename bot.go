@@ -4,7 +4,6 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -16,7 +15,10 @@ import (
 
 //go:embed config.json
 var configFile embed.FS
-var maxFileSize int64 = 49 * 1024 * 1024 // 50 MB
+var (
+	maxFileSize int64 = 49 * 1024 * 1024 // 50 MB
+	bitrateKBps       = 128
+)
 
 type Config struct {
 	BotToken  string `json:"bot-token"`
@@ -110,7 +112,7 @@ func checkAndSendFile(filePath string, chatID int64, bot *tgbotapi.BotAPI) error
 
 	if fileInfo.Size() > maxFileSize {
 		log.Println("File exceeds 50 MB, splitting into parts")
-		partFiles, err := splitFile(filePath, maxFileSize)
+		partFiles, err := splitFile(filePath, maxFileSize, bitrateKBps)
 		if err != nil {
 			return fmt.Errorf("error splitting file: %v", err)
 		}
@@ -131,35 +133,43 @@ func checkAndSendFile(filePath string, chatID int64, bot *tgbotapi.BotAPI) error
 	return nil
 }
 
-func splitFile(filePath string, chunkSize int64) ([]string, error) {
+func splitFile(filePath string, chunkSize int64, bitrateKbps int) ([]string, error) {
 	var partFiles []string
 
-	file, err := os.Open(filePath)
+	segmentTime := calculateSegmentTime(chunkSize, bitrateKbps)
+	log.Printf("Splitting file with segment time of %d seconds", segmentTime)
+
+	outputPattern := fmt.Sprintf("%s.part%%03d.mp3", filePath)
+
+	cmd := exec.Command("ffmpeg", "-i", filePath, "-f", "segment", "-segment_time", fmt.Sprintf("%d", segmentTime), "-c", "copy", outputPattern)
+
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("could not open file: %v", err)
+		log.Printf("Error splitting file with ffmpeg: %s\n%s", err, string(output))
+		return nil, err
 	}
-	defer file.Close()
 
-	fileInfo, _ := file.Stat()
-	totalSize := fileInfo.Size()
-
-	for i := int64(0); i < totalSize; i += chunkSize {
-		partFilename := fmt.Sprintf("%s.part%d", filePath, i/chunkSize)
-		partFile, err := os.Create(partFilename)
-		if err != nil {
-			return nil, fmt.Errorf("could not create part file: %v", err)
+	i := 0
+	for {
+		partFilename := fmt.Sprintf("%s.part%03d.mp3", filePath, i)
+		if err := exec.Command("test", "-f", partFilename).Run(); err != nil {
+			break // No more parts exist
 		}
-
-		_, err = io.CopyN(partFile, file, chunkSize)
-		if err != nil && err != io.EOF {
-			return nil, fmt.Errorf("error copying part: %v", err)
-		}
-		partFile.Close()
-
 		partFiles = append(partFiles, partFilename)
+		i++
 	}
 
+	log.Printf("File split successfully into %d parts", len(partFiles))
 	return partFiles, nil
+}
+
+func calculateSegmentTime(chunkSize int64, bitrateKbps int) int {
+	chunkSizeKB := chunkSize / 1024
+
+	bitrateKBps := int64(bitrateKbps / 8)
+
+	segmentTime := chunkSizeKB / bitrateKBps
+	return int(segmentTime)
 }
 
 func isValidYouTubeURL(url string) bool {
@@ -170,7 +180,14 @@ func downloadMp3(url string, chatID int64) (string, string, error) {
 	timestamp := time.Now().UnixNano()
 	filenameTemplate := fmt.Sprintf("download_%d_%d.%%(ext)s", chatID, timestamp)
 
-	cmd := exec.Command("yt-dlp", "-x", "--audio-format", "mp3", "-o", filenameTemplate, url)
+	cmd := exec.Command(
+		"yt-dlp",
+		"-x",
+		"--audio-format", "mp3",
+		"--audio-quality", fmt.Sprintf("%dK", bitrateKBps),
+		"-o", filenameTemplate,
+		url,
+	)
 
 	output, err := cmd.CombinedOutput()
 
